@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(G4GPU LANGUAGES CXX CUDA)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -46,9 +48,20 @@ endif()
 add_library(G4GPU SHARED
   src/core/G4GPUTrackBuffer.cc
   src/core/G4GPUTrackingManager.cc
+  src/core/Track.cc
   src/geometry/VoxelGeometry.cc
   src/geometry/VoxelGeometry.cu
   src/hits/G4GPUHitBuffer.cu
+  src/physics/CrossSectionInterpolator.cc
+  src/geometry/branchless_solids.cc
+  src/geometry/navigation_prefetch.cc
+)
+set_source_files_properties(
+  src/physics/CrossSectionInterpolator.cc
+  src/geometry/branchless_solids.cc
+  src/core/Track.cc
+  src/geometry/navigation_prefetch.cc
+  PROPERTIES COMPILE_OPTIONS "-O3"
 )
 
 target_include_directories(G4GPU
@@ -69,7 +82,28 @@ endif()
 
 if(G4GPU_WITH_OPTICAL OR G4GPU_WITH_RTX)
   target_link_libraries(G4GPU PUBLIC ${OptiX_LIBRARIES})
-  target_include_directories(G4GPU PRIVATE ${OptiX_INCLUDE_DIRS})
+  target_include_directories(G4GPU PUBLIC ${OptiX_INCLUDE_DIRS})
+endif()
+
+if(G4GPU_WITH_RTX)
+  target_compile_definitions(G4GPU PUBLIC G4GPU_WITH_RTX=1)
+  target_sources(G4GPU PRIVATE src/geometry/RTXGeometry.cc)
+  list(GET CMAKE_CUDA_ARCHITECTURES 0 G4GPU_RTX_CUDA_ARCH)
+  set(G4GPU_RTX_PTX "${CMAKE_CURRENT_BINARY_DIR}/RTXGeometry.ptx")
+  add_custom_command(
+    OUTPUT "${G4GPU_RTX_PTX}"
+    COMMAND ${CMAKE_CUDA_COMPILER} --ptx -std=c++17
+            -arch=sm_${G4GPU_RTX_CUDA_ARCH}
+            -DG4GPU_WITH_RTX=1
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include
+            -I${OptiX_INCLUDE_DIRS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/geometry/RTXGeometry.cu
+            -o "${G4GPU_RTX_PTX}"
+    DEPENDS src/geometry/RTXGeometry.cu include/g4gpu/RTXGeometry.hh
+    VERBATIM)
+  add_custom_target(g4gpu_rtx_ptx DEPENDS "${G4GPU_RTX_PTX}")
+  add_dependencies(G4GPU g4gpu_rtx_ptx)
+  target_compile_definitions(G4GPU PRIVATE G4GPU_RTX_PTX_PATH="${G4GPU_RTX_PTX}")
 endif()
 
 set_target_properties(G4GPU PROPERTIES
@@ -102,10 +136,54 @@ if(G4GPU_WITH_MUON)
   add_test(NAME g4gpu_mcs COMMAND ${CMAKE_BINARY_DIR}/tests/test_mcs)
 endif()
 
+add_executable(test_cross_section_interpolator tests/test_cross_section_interpolator.cc)
+target_link_libraries(test_cross_section_interpolator PRIVATE G4GPU)
+set_target_properties(test_cross_section_interpolator PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_test(NAME g4gpu_cross_section_interpolator COMMAND ${CMAKE_BINARY_DIR}/tests/test_cross_section_interpolator)
+
+add_executable(test_branchless_solids tests/test_branchless_solids.cc)
+target_link_libraries(test_branchless_solids PRIVATE G4GPU)
+set_target_properties(test_branchless_solids PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_test(NAME g4gpu_branchless_solids COMMAND ${CMAKE_BINARY_DIR}/tests/test_branchless_solids)
+
+add_executable(test_track_alignment tests/test_track_alignment.cc)
+target_link_libraries(test_track_alignment PRIVATE G4GPU)
+set_target_properties(test_track_alignment PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_test(NAME g4gpu_track_alignment COMMAND ${CMAKE_BINARY_DIR}/tests/test_track_alignment)
+
+
+add_executable(test_navigation_prefetch tests/test_navigation_prefetch.cc)
+target_link_libraries(test_navigation_prefetch PRIVATE G4GPU)
+set_target_properties(test_navigation_prefetch PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_test(NAME g4gpu_navigation_prefetch COMMAND ${CMAKE_BINARY_DIR}/tests/test_navigation_prefetch)
+
+add_executable(test_rtx_geometry tests/test_rtx_geometry.cc)
+target_link_libraries(test_rtx_geometry PRIVATE G4GPU)
+set_target_properties(test_rtx_geometry PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+add_test(NAME g4gpu_rtx_geometry COMMAND ${CMAKE_BINARY_DIR}/tests/test_rtx_geometry)
+
 add_executable(test_benchmark_manifest tests/test_benchmark_manifest.cc)
-target_include_directories(test_benchmark_manifest PRIVATE benchmarks/events benchmarks/geometries)
+target_link_libraries(test_benchmark_manifest PRIVATE G4GPU)
+target_include_directories(test_benchmark_manifest
+  PRIVATE
+    benchmarks/canonical
+    benchmarks/events
+    benchmarks/geometries
+)
 set_target_properties(test_benchmark_manifest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
 add_test(NAME g4gpu_benchmark_manifest COMMAND ${CMAKE_BINARY_DIR}/tests/test_benchmark_manifest)
+add_test(
+  NAME g4gpu_benchmark_script_syntax
+  COMMAND bash -lc
+    "bash -n '${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/run_baseline.sh' && bash -n '${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/profile_cpu.sh' && bash -n '${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/profile_gpu.sh'"
+)
+add_test(
+  NAME g4gpu_validate_harness
+  COMMAND ${G4GPU_BENCHMARK_PYTHON}
+    ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/tools/validate_self_test.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/validate.py
+    ${CMAKE_BINARY_DIR}/benchmarks/validate-self
+)
 
 set(G4GPU_BENCHMARK_EVENTS
   gamma_100mev
