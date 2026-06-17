@@ -1,5 +1,12 @@
 build/
+build*/
 benchmarks/results/
 benchmarks/profiles/
+__pycache__/
+**/__pycache__/
 ._*
 **/._*
+benchmarks/reference/
+benchmarks/raw/
+benchmarks/hardware_evidence/
+benchmarks/build_logs/
